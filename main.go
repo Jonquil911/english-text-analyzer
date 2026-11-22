@@ -8,18 +8,39 @@ import (
 	"strings"
 )
 
+// Worker pool settings (explained in README).
+const (
+	workerCount   = 3
+	queueCapacity = 5
+)
+
 func main() {
 	store := NewTaskStore(TextAnalyzer{})
+	pool, err := NewWorkerPool(store, workerCount, queueCapacity)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Cannot start worker pool:", err)
+		os.Exit(1)
+	}
+	// Always stop the workers and wait for accepted tasks before exiting.
+	defer func() {
+		fmt.Println("Shutting down: finishing accepted tasks...")
+		pool.Shutdown()
+		fmt.Println("All workers stopped.")
+	}()
+
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
 
-	fmt.Println("English Text Analyzer (Checkpoint 1)")
+	fmt.Printf("English Text Analyzer (Checkpoint 2): %d workers, queue capacity %d\n",
+		pool.Workers(), pool.QueueCapacity())
 
 	for {
 		fmt.Println("\n1 - Create task")
-		fmt.Println("2 - Process task")
-		fmt.Println("3 - Get task")
-		fmt.Println("4 - List tasks")
+		fmt.Println("2 - Submit task to worker pool (async)")
+		fmt.Println("3 - Process task now (sync, Checkpoint 1)")
+		fmt.Println("4 - Get task")
+		fmt.Println("5 - List tasks")
+		fmt.Println("6 - Create and submit several texts")
 		fmt.Println("0 - Exit")
 		fmt.Print("Choose: ")
 
@@ -45,6 +66,18 @@ func main() {
 			if !ok {
 				continue
 			}
+			// Submit returns right away; a worker processes the task later.
+			if err := pool.Submit(id); err != nil {
+				fmt.Println("Error:", err)
+				continue
+			}
+			fmt.Printf("Task #%d submitted. Use option 4 to check its status.\n", id)
+
+		case "3":
+			id, ok := askID(scanner)
+			if !ok {
+				continue
+			}
 			task, err := store.Process(id)
 			if err != nil {
 				fmt.Println("Error:", err)
@@ -52,7 +85,7 @@ func main() {
 			}
 			printTask(task)
 
-		case "3":
+		case "4":
 			id, ok := askID(scanner)
 			if !ok {
 				continue
@@ -64,7 +97,7 @@ func main() {
 			}
 			printTask(task)
 
-		case "4":
+		case "5":
 			tasks := store.List()
 			if len(tasks) == 0 {
 				fmt.Println("No tasks yet.")
@@ -73,8 +106,11 @@ func main() {
 				fmt.Printf("#%d: %s\n", task.ID, task.Status)
 			}
 
+		case "6":
+			submitMany(scanner, store, pool)
+
 		case "0":
-			return
+			return // deferred Shutdown runs here
 
 		default:
 			fmt.Println("Unknown option.")
@@ -83,6 +119,28 @@ func main() {
 
 	if err := scanner.Err(); err != nil {
 		fmt.Fprintln(os.Stderr, "Input error:", err)
+	}
+}
+
+// submitMany reads texts until an empty line, then creates and submits each one.
+func submitMany(scanner *bufio.Scanner, store *TaskStore, pool *WorkerPool) {
+	fmt.Println("Enter texts, one per line. Empty line to finish:")
+	for scanner.Scan() {
+		text := scanner.Text()
+		if strings.TrimSpace(text) == "" {
+			return
+		}
+		task, err := store.Create(text)
+		if err != nil {
+			fmt.Println("  Error:", err)
+			continue
+		}
+		if err := pool.Submit(task.ID); err != nil {
+			// e.g. queue full: the task stays Pending and can be submitted later
+			fmt.Printf("  Task #%d created but not submitted: %v\n", task.ID, err)
+			continue
+		}
+		fmt.Printf("  Task #%d submitted\n", task.ID)
 	}
 }
 
